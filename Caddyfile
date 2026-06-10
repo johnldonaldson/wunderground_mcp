@@ -1,0 +1,12 @@
+{
+	admin off
+}
+
+http://:{$HTTP_PORT:8443} {
+	bind 0.0.0.0
+
+	@ha path /ha/*
+	reverse_proxy @ha {$HA_API_HOST:127.0.0.1}:{$HA_API_PORT:8001}
+
+	reverse_proxy {$MCP_HOST:127.0.0.1}:{$MCP_PORT:8000}
+}

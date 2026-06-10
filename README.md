@@ -4,8 +4,9 @@ This repository provides a small Model Context Protocol (MCP) server for Weather
 Underground / Weather.com personal weather station data. It exposes tools for
 current local conditions and a 5-day forecast for a configured station.
 
-The server is implemented with `FastMCP` and is intended to run from VS Code MCP
-configuration over stdio.
+The server is implemented with `FastMCP`. It can run from VS Code MCP
+configuration over stdio, or from Docker as an HTTP SSE service for Home
+Assistant.
 
 ## Features
 
@@ -29,12 +30,29 @@ configuration over stdio.
 - A Weather Underground personal weather station ID, for example
 	`KCAHUNTI63`.
 
-Python package dependencies are managed in `pyproject.toml`:
+## Install Dependencies
+
+This project uses `uv` to install and run Python dependencies from
+`pyproject.toml`.
+
+Install `uv` if it is not already available:
+
+```sh
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+Then install the project dependencies:
+
+```sh
+uv sync
+```
+
+The dependencies installed by `uv sync` are:
 
 ```toml
 dependencies = [
-		"httpx>=0.28.1",
-		"mcp[cli]>=1.27.2",
+	"httpx>=0.28.1",
+	"mcp[cli]>=1.27.2",
 ]
 ```
 
@@ -46,6 +64,15 @@ The server reads these environment variables:
 | --- | --- | --- |
 | `WU_API_KEY` | Yes | Weather Underground / Weather.com API key. |
 | `WU_STATION_ID` | No | Personal weather station ID. Defaults to `KCAHUNTI63`. |
+| `MCP_TRANSPORT` | No | MCP transport. Defaults to `stdio`; Docker sets this to `sse` for Home Assistant. Use `streamable-http` for clients that support that transport. |
+| `MCP_HOST` | No | HTTP bind host used by FastMCP. Defaults to `127.0.0.1`. |
+| `MCP_PORT` | No | HTTP bind port used by FastMCP. Defaults to `8000`. |
+| `MCP_SSE_PATH` | No | SSE MCP path used by Home Assistant. Defaults to `/sse`. |
+| `MCP_MESSAGE_PATH` | No | SSE client-to-server message path. Defaults to `/messages/`. |
+| `MCP_STREAMABLE_HTTP_PATH` | No | Streamable HTTP MCP path. Defaults to `/mcp`. |
+| `MCP_ALLOWED_HOSTS` | No | Comma-separated Host headers allowed by FastMCP DNS rebinding protection. Defaults include `10.0.0.37:*`. |
+| `MCP_ALLOWED_ORIGINS` | No | Comma-separated Origin headers allowed by FastMCP DNS rebinding protection. Defaults include `http://10.0.0.37:*`. |
+| `HTTP_PORT` | No | HTTP port exposed by Caddy in Docker. Defaults to `8443`. |
 
 ## VS Code MCP Configuration
 
@@ -75,6 +102,86 @@ and credentials with your own values.
 
 After changing the server code or MCP configuration, restart or reload the MCP
 server in VS Code so newly added tools are discovered.
+
+## Docker HTTP Service for Home Assistant
+
+Build the Ubuntu `linux/amd64` Docker image:
+
+```sh
+docker buildx build --platform linux/amd64 -t wunderground-mcp .
+```
+
+Run it as a fully contained HTTP service:
+
+```sh
+docker run --rm \
+	-p 8443:8443 \
+	-e MCP_ALLOWED_HOSTS="localhost:*,127.0.0.1:*,10.0.0.37:*" \
+	-e MCP_ALLOWED_ORIGINS="http://localhost:*,http://127.0.0.1:*,http://10.0.0.37:*" \
+	-e WU_API_KEY="your-api-key" \
+	-e WU_STATION_ID="your-station-id" \
+	wunderground-mcp
+```
+
+The MCP SSE endpoint is available at:
+
+```text
+http://10.0.0.37:8443/sse
+```
+
+Enter that URL as the Home Assistant MCP integration's **SSE Server URL**. Home
+Assistant currently supports MCP tools over SSE, not streamable HTTP, so Docker
+defaults `MCP_TRANSPORT` to `sse`.
+
+The image runs FastMCP on localhost inside the container and uses Caddy as the
+public HTTP reverse proxy.
+
+## Home Assistant Forecast Entities
+
+If your current weather sensors already exist in Home Assistant, only add
+forecast sensors from this endpoint:
+
+```text
+http://10.0.0.37:8443/ha/forecast
+```
+
+If your `configuration.yaml` has `sensor: !include sensors.yaml`, add these
+entries to `sensors.yaml`:
+
+```yaml
+- platform: rest
+  name: wunderground_forecast_today
+  unique_id: wunderground_forecast_today
+  resource: http://10.0.0.37:8443/ha/forecast
+  scan_interval: 1800
+  value_template: "{{ value_json.days[0].narrative }}"
+  json_attributes_path: "$.days[0]"
+  json_attributes:
+    - day
+    - high_f
+    - low_f
+    - day_summary
+    - night_summary
+
+- platform: rest
+  name: wunderground_forecast_tomorrow
+  unique_id: wunderground_forecast_tomorrow
+  resource: http://10.0.0.37:8443/ha/forecast
+  scan_interval: 1800
+  value_template: "{{ value_json.days[1].narrative }}"
+  json_attributes_path: "$.days[1]"
+  json_attributes:
+    - day
+    - high_f
+    - low_f
+    - day_summary
+    - night_summary
+```
+
+If your sensors are defined directly in `configuration.yaml`, put those same
+entries under your existing top-level `sensor:` key. After restarting Home
+Assistant, expose `sensor.wunderground_forecast_today` and
+`sensor.wunderground_forecast_tomorrow` to Assist.
 
 ## Available MCP Tools
 
@@ -126,12 +233,6 @@ Tomorrow night: Partly Cloudy, precip 11%, Winds SSE at 5 to 10 mph.
 
 ## Local Development
 
-Install dependencies with `uv`:
-
-```sh
-uv sync
-```
-
 Run the MCP server directly:
 
 ```sh
@@ -156,13 +257,21 @@ WU_API_KEY="your-api-key" WU_STATION_ID="KCAHUNTI63" \
 
 ```text
 .
+├── .dockerignore
+├── Caddyfile
+├── Dockerfile
 ├── README.md
+├── docker-entrypoint.sh
+├── ha_api_server.py
 ├── pyproject.toml
 └── wunderground_server.py
 ```
 
 `wunderground_server.py` contains the MCP server and Weather.com API calls.
+`ha_api_server.py` exposes JSON endpoints for Home Assistant REST sensors.
 `pyproject.toml` defines the Python version and package dependencies.
+`Dockerfile`, `Caddyfile`, and `docker-entrypoint.sh` package the server as an
+HTTP container service.
 
 ## Notes
 

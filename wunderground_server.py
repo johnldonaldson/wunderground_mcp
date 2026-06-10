@@ -1,13 +1,62 @@
 import os
+from typing import Literal, cast
+
 import httpx
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
-# Initialize the FastMCP server
-mcp = FastMCP("WeatherUnderground")
+McpTransport = Literal["stdio", "sse", "streamable-http"]
 
-# Load your Weather Underground credentials
+
+def split_csv_env(name: str, default: str) -> list[str]:
+    return [
+        value.strip()
+        for value in os.getenv(name, default).split(",")
+        if value.strip()
+    ]
+
+
+def get_mcp_transport() -> McpTransport:
+    transport = os.getenv("MCP_TRANSPORT", "stdio")
+
+    if transport not in ("stdio", "sse", "streamable-http"):
+        raise ValueError(
+            "MCP_TRANSPORT must be one of: stdio, sse, streamable-http"
+        )
+
+    return cast(McpTransport, transport)
+
+
+MCP_HOST = os.getenv("MCP_HOST", "127.0.0.1")
+MCP_PORT = int(os.getenv("MCP_PORT", "8000"))
+MCP_SSE_PATH = os.getenv("MCP_SSE_PATH", "/sse")
+MCP_MESSAGE_PATH = os.getenv("MCP_MESSAGE_PATH", "/messages/")
+MCP_STREAMABLE_HTTP_PATH = os.getenv("MCP_STREAMABLE_HTTP_PATH", "/mcp")
+MCP_TRANSPORT = get_mcp_transport()
+MCP_ALLOWED_HOSTS = split_csv_env(
+    "MCP_ALLOWED_HOSTS",
+    "localhost:*,127.0.0.1:*,10.0.0.37:*",
+)
+MCP_ALLOWED_ORIGINS = split_csv_env(
+    "MCP_ALLOWED_ORIGINS",
+    "http://localhost:*,http://127.0.0.1:*,http://10.0.0.37:*",
+)
+
+mcp = FastMCP(
+    "WeatherUnderground",
+    host=MCP_HOST,
+    port=MCP_PORT,
+    sse_path=MCP_SSE_PATH,
+    message_path=MCP_MESSAGE_PATH,
+    streamable_http_path=MCP_STREAMABLE_HTTP_PATH,
+    transport_security=TransportSecuritySettings(
+        allowed_hosts=MCP_ALLOWED_HOSTS,
+        allowed_origins=MCP_ALLOWED_ORIGINS,
+    ),
+)
+
 API_KEY = os.getenv("WU_API_KEY")
-STATION_ID = os.getenv("WU_STATION_ID", "KCAHUNTI63")  # Replace with your PWS
+STATION_ID = os.getenv("WU_STATION_ID", "KCAHUNTI63")
 CURRENT_CONDITIONS_URL = "https://api.weather.com/v2/pws/observations/current"
 DAILY_FORECAST_URL = "https://api.weather.com/v3/wx/forecast/daily/5day"
 
@@ -57,9 +106,7 @@ def format_temperature(value: int | None) -> str:
     return f"{value}°F"
 
 
-@mcp.tool()
-async def get_current_conditions() -> str:
-    """Get current weather for your configured Weather Underground station."""
+async def get_current_conditions_payload() -> dict | str:
     data = await fetch_weather_json(
         CURRENT_CONDITIONS_URL,
         {
@@ -72,34 +119,32 @@ async def get_current_conditions() -> str:
     if isinstance(data, str):
         return data
 
-    # Parse the observation data
     observation = data["observations"][0]
     obs = observation["imperial"]
 
-    return (
-        f"Current weather in {observation['neighborhood']} "
-        f"(Station ID: {STATION_ID})\n"
-        f"Observed local: {observation['obsTimeLocal']}\n"
-        f"Temperature: {obs['temp']}°F\n"
-        f"Feels like: {obs['heatIndex']}°F\n"
-        f"Wind chill: {obs['windChill']}°F\n"
-        f"Dew point: {obs['dewpt']}°F\n"
-        f"Humidity: {observation['humidity']}%\n"
-        f"Wind: {obs['windSpeed']} mph from {observation['winddir']}°\n"
-        f"Wind gust: {obs['windGust']} mph\n"
-        f"Pressure: {obs['pressure']} inHg\n"
-        f"Precip rate: {obs['precipRate']} in/hr\n"
-        f"Precip total: {obs['precipTotal']} in\n"
-        f"Solar radiation: {observation['solarRadiation']}\n"
-        f"UV: {observation['uv']}\n"
-        f"Elevation: {obs['elev']} ft\n"
-        f"QC status: {observation['qcStatus']}"
-    )
+    return {
+        "station_id": STATION_ID,
+        "neighborhood": observation["neighborhood"],
+        "observed_local": observation["obsTimeLocal"],
+        "temperature_f": obs["temp"],
+        "feels_like_f": obs["heatIndex"],
+        "wind_chill_f": obs["windChill"],
+        "dew_point_f": obs["dewpt"],
+        "humidity_percent": observation["humidity"],
+        "wind_speed_mph": obs["windSpeed"],
+        "wind_direction_degrees": observation["winddir"],
+        "wind_gust_mph": obs["windGust"],
+        "pressure_inhg": obs["pressure"],
+        "precip_rate_in_per_hr": obs["precipRate"],
+        "precip_total_in": obs["precipTotal"],
+        "solar_radiation": observation["solarRadiation"],
+        "uv": observation["uv"],
+        "elevation_ft": obs["elev"],
+        "qc_status": observation["qcStatus"],
+    }
 
 
-@mcp.tool()
-async def get_forecast() -> str:
-    """Get a 5-day forecast for your configured Weather Underground station."""
+async def get_forecast_payload() -> dict | str:
     current_data = await fetch_weather_json(
         CURRENT_CONDITIONS_URL,
         {
@@ -128,35 +173,86 @@ async def get_forecast() -> str:
         return forecast_data
 
     daypart = forecast_data["daypart"][0]
+    forecast_days = min(5, len(forecast_data["dayOfWeek"]))
+    days = []
+
+    for day_index in range(forecast_days):
+        days.append(
+            {
+                "day": forecast_data["dayOfWeek"][day_index],
+                "high_f": forecast_data["temperatureMax"][day_index],
+                "low_f": forecast_data["temperatureMin"][day_index],
+                "narrative": forecast_data["narrative"][day_index],
+                "day_summary": format_daypart(daypart, day_index * 2),
+                "night_summary": format_daypart(daypart, day_index * 2 + 1),
+            }
+        )
+
+    return {
+        "station_id": STATION_ID,
+        "neighborhood": observation["neighborhood"],
+        "days": days,
+    }
+
+
+@mcp.tool()
+async def get_current_conditions() -> str:
+    """Get current weather for your configured Weather Underground station."""
+    conditions = await get_current_conditions_payload()
+
+    if isinstance(conditions, str):
+        return conditions
+
+    return (
+        f"Current weather in {conditions['neighborhood']} "
+        f"(Station ID: {STATION_ID})\n"
+        f"Observed local: {conditions['observed_local']}\n"
+        f"Temperature: {conditions['temperature_f']}°F\n"
+        f"Feels like: {conditions['feels_like_f']}°F\n"
+        f"Wind chill: {conditions['wind_chill_f']}°F\n"
+        f"Dew point: {conditions['dew_point_f']}°F\n"
+        f"Humidity: {conditions['humidity_percent']}%\n"
+        f"Wind: {conditions['wind_speed_mph']} mph from "
+        f"{conditions['wind_direction_degrees']}°\n"
+        f"Wind gust: {conditions['wind_gust_mph']} mph\n"
+        f"Pressure: {conditions['pressure_inhg']} inHg\n"
+        f"Precip rate: {conditions['precip_rate_in_per_hr']} in/hr\n"
+        f"Precip total: {conditions['precip_total_in']} in\n"
+        f"Solar radiation: {conditions['solar_radiation']}\n"
+        f"UV: {conditions['uv']}\n"
+        f"Elevation: {conditions['elevation_ft']} ft\n"
+        f"QC status: {conditions['qc_status']}"
+    )
+
+
+@mcp.tool()
+async def get_forecast() -> str:
+    """Get a 5-day forecast for your configured Weather Underground station."""
+    forecast = await get_forecast_payload()
+
+    if isinstance(forecast, str):
+        return forecast
+
     lines = [
-        f"5-day forecast for {observation['neighborhood']} "
+        f"5-day forecast for {forecast['neighborhood']} "
         f"(Station ID: {STATION_ID})"
     ]
 
-    forecast_days = min(5, len(forecast_data["dayOfWeek"]))
-
-    for day_index in range(forecast_days):
-        day_name = forecast_data["dayOfWeek"][day_index]
-        high = forecast_data["temperatureMax"][day_index]
-        low = forecast_data["temperatureMin"][day_index]
-        narrative = forecast_data["narrative"][day_index]
-        day_summary = format_daypart(daypart, day_index * 2)
-        night_summary = format_daypart(daypart, day_index * 2 + 1)
-
+    for day in forecast["days"]:
         lines.append(
-            f"\n{day_name}: High {format_temperature(high)} / "
-            f"Low {format_temperature(low)}\n"
-            f"Summary: {narrative}"
+            f"\n{day['day']}: High {format_temperature(day['high_f'])} / "
+            f"Low {format_temperature(day['low_f'])}\n"
+            f"Summary: {day['narrative']}"
         )
 
-        if day_summary:
-            lines.append(day_summary)
+        if day["day_summary"]:
+            lines.append(day["day_summary"])
 
-        if night_summary:
-            lines.append(night_summary)
+        if day["night_summary"]:
+            lines.append(day["night_summary"])
 
     return "\n".join(lines)
 
 
 if __name__ == "__main__":
-    mcp.run()
+    mcp.run(transport=MCP_TRANSPORT)
