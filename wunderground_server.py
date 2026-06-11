@@ -58,7 +58,11 @@ mcp = FastMCP(
 API_KEY = os.getenv("WU_API_KEY")
 STATION_ID = os.getenv("WU_STATION_ID", "KCAHUNTI63")
 CURRENT_CONDITIONS_URL = "https://api.weather.com/v2/pws/observations/current"
+NEAREST_STATION_URL = (
+    "https://api.weather.com/v2/pws/observations/nearest"
+)
 DAILY_FORECAST_URL = "https://api.weather.com/v3/wx/forecast/daily/5day"
+LOCATION_SEARCH_URL = "https://api.weather.com/v3/location/search"
 
 
 async def fetch_weather_json(
@@ -80,14 +84,14 @@ async def fetch_weather_json(
 
 
 def format_daypart(daypart: dict, index: int) -> str | None:
-    name = daypart["daypartName"][index]
-    phrase = daypart["wxPhraseLong"][index]
+    name = get_indexed_weather_value(daypart, "daypartName", index)
+    phrase = get_indexed_weather_value(daypart, "wxPhraseLong", index)
 
     if not name or not phrase:
         return None
 
-    precip_chance = daypart["precipChance"][index]
-    wind_phrase = daypart["windPhrase"][index]
+    precip_chance = get_indexed_weather_value(daypart, "precipChance", index)
+    wind_phrase = get_indexed_weather_value(daypart, "windPhrase", index)
     summary = f"{name}: {phrase}"
 
     if precip_chance is not None:
@@ -104,6 +108,144 @@ def format_temperature(value: int | None) -> str:
         return "unavailable"
 
     return f"{value}°F"
+
+
+def get_indexed_weather_value(
+    weather_data: dict,
+    key: str,
+    index: int,
+) -> object | None:
+    values = weather_data.get(key)
+
+    if not isinstance(values, list) or index >= len(values):
+        return None
+
+    return values[index]
+
+
+def format_city_state_location(location: dict) -> str:
+    city = location.get("city")
+    state = location.get("state")
+
+    if city and state:
+        return f"{city}, {state}"
+
+    return str(location.get("query", "requested location"))
+
+
+def get_indexed_location_value(location_data: dict, key: str) -> object | None:
+    values = location_data.get(key)
+
+    if not isinstance(values, list) or not values:
+        return None
+
+    return values[0]
+
+
+def normalize_city_state_input(city: str, state: str) -> tuple[str, str]:
+    city = city.strip()
+    state = state.strip()
+
+    if not state and "," in city:
+        city, state = [part.strip() for part in city.split(",", 1)]
+
+    if not state:
+        city_parts = city.rsplit(maxsplit=1)
+
+        if len(city_parts) == 2 and len(city_parts[1]) == 2:
+            city, state = city_parts
+
+    if len(state) == 2:
+        state = state.upper()
+
+    return city, state
+
+
+async def resolve_city_state_location(city: str, state: str) -> dict | str:
+    city, state = normalize_city_state_input(city, state)
+
+    if not city or not state:
+        return (
+            "Specify both city and state, for example "
+            "city='Huntington Beach', state='CA'."
+        )
+
+    query = f"{city}, {state}"
+    data = await fetch_weather_json(
+        LOCATION_SEARCH_URL,
+        {
+            "query": query,
+            "locationType": "city",
+            "format": "json",
+            "language": "en-US",
+        },
+    )
+
+    if isinstance(data, str):
+        return data
+
+    location_data = data.get("location")
+
+    if not isinstance(location_data, dict):
+        return f"No location found for {query}."
+
+    latitude = get_indexed_location_value(location_data, "latitude")
+    longitude = get_indexed_location_value(location_data, "longitude")
+
+    if latitude is None or longitude is None:
+        return f"No geocode found for {query}."
+
+    return {
+        "query": query,
+        "city": get_indexed_location_value(location_data, "city"),
+        "state": get_indexed_location_value(location_data, "adminDistrictCode")
+        or get_indexed_location_value(location_data, "adminDistrict"),
+        "country": get_indexed_location_value(location_data, "countryCode"),
+        "geocode": f"{latitude},{longitude}",
+    }
+
+
+def parse_forecast_days(forecast_data: dict) -> list[dict]:
+    dayparts = forecast_data.get("daypart")
+
+    if not isinstance(dayparts, list) or not dayparts:
+        return []
+
+    daypart = dayparts[0]
+    day_of_week = forecast_data.get("dayOfWeek")
+
+    if not isinstance(day_of_week, list):
+        return []
+
+    forecast_days = min(5, len(day_of_week))
+    days = []
+
+    for day_index in range(forecast_days):
+        days.append(
+            {
+                "day": day_of_week[day_index],
+                "high_f": get_indexed_weather_value(
+                    forecast_data,
+                    "temperatureMax",
+                    day_index,
+                ),
+                "low_f": get_indexed_weather_value(
+                    forecast_data,
+                    "temperatureMin",
+                    day_index,
+                ),
+                "narrative": get_indexed_weather_value(
+                    forecast_data,
+                    "narrative",
+                    day_index,
+                )
+                or "Forecast narrative unavailable.",
+                "day_summary": format_daypart(daypart, day_index * 2),
+                "night_summary": format_daypart(daypart, day_index * 2 + 1),
+            }
+        )
+
+    return days
 
 
 async def get_current_conditions_payload() -> dict | str:
@@ -172,32 +314,95 @@ async def get_forecast_payload() -> dict | str:
     if isinstance(forecast_data, str):
         return forecast_data
 
-    daypart = forecast_data["daypart"][0]
-    forecast_days = min(5, len(forecast_data["dayOfWeek"]))
-    days = []
-
-    for day_index in range(forecast_days):
-        days.append(
-            {
-                "day": forecast_data["dayOfWeek"][day_index],
-                "high_f": forecast_data["temperatureMax"][day_index],
-                "low_f": forecast_data["temperatureMin"][day_index],
-                "narrative": forecast_data["narrative"][day_index],
-                "day_summary": format_daypart(daypart, day_index * 2),
-                "night_summary": format_daypart(daypart, day_index * 2 + 1),
-            }
-        )
-
     return {
         "station_id": STATION_ID,
         "neighborhood": observation["neighborhood"],
-        "days": days,
+        "days": parse_forecast_days(forecast_data),
+    }
+
+
+async def get_city_current_conditions_payload(
+    city: str,
+    state: str,
+) -> dict | str:
+    location = await resolve_city_state_location(city, state)
+
+    if isinstance(location, str):
+        return location
+
+    data = await fetch_weather_json(
+        NEAREST_STATION_URL,
+        {
+            "geocode": location["geocode"],
+            "units": "e",
+            "numStations": 1,
+            "format": "json",
+        },
+    )
+
+    if isinstance(data, str):
+        return data
+
+    observations = data.get("observations")
+
+    if not isinstance(observations, list) or not observations:
+        return f"No current conditions found near {location['query']}."
+
+    observation = observations[0]
+    obs = observation.get("imperial", {})
+
+    return {
+        "location": format_city_state_location(location),
+        "neighborhood": observation.get("neighborhood"),
+        "station_id": observation.get("stationID"),
+        "observed_local": observation.get("obsTimeLocal"),
+        "temperature_f": obs.get("temp"),
+        "feels_like_f": obs.get("heatIndex"),
+        "wind_chill_f": obs.get("windChill"),
+        "dew_point_f": obs.get("dewpt"),
+        "humidity_percent": observation.get("humidity"),
+        "wind_speed_mph": obs.get("windSpeed"),
+        "wind_direction_degrees": observation.get("winddir"),
+        "wind_gust_mph": obs.get("windGust"),
+        "pressure_inhg": obs.get("pressure"),
+        "uv": observation.get("uv"),
+    }
+
+
+async def get_city_forecast_payload(city: str, state: str) -> dict | str:
+    location = await resolve_city_state_location(city, state)
+
+    if isinstance(location, str):
+        return location
+
+    forecast_data = await fetch_weather_json(
+        DAILY_FORECAST_URL,
+        {
+            "geocode": location["geocode"],
+            "format": "json",
+            "units": "e",
+            "language": "en-US",
+        },
+    )
+
+    if isinstance(forecast_data, str):
+        return forecast_data
+
+    return {
+        "location": format_city_state_location(location),
+        "days": parse_forecast_days(forecast_data),
     }
 
 
 @mcp.tool()
-async def get_current_conditions() -> str:
-    """Get current weather for your configured Weather Underground station."""
+async def get_station_conditions() -> str:
+    """Get current weather conditions for the user's own personal
+    weather station.
+
+    Use this for queries like 'what is my weather', 'current
+    conditions', or 'how is the weather here'. Do NOT use this
+    when the user specifies any city or state.
+    """
     conditions = await get_current_conditions_payload()
 
     if isinstance(conditions, str):
@@ -226,8 +431,14 @@ async def get_current_conditions() -> str:
 
 
 @mcp.tool()
-async def get_forecast() -> str:
-    """Get a 5-day forecast for your configured Weather Underground station."""
+async def get_station_forecast() -> str:
+    """Get a 5-day weather forecast for the user's own personal
+    weather station.
+
+    Use this for queries like 'what is my forecast', 'will it
+    rain this week', or 'forecast for here'. Do NOT use this
+    when the user specifies any city or state.
+    """
     forecast = await get_forecast_payload()
 
     if isinstance(forecast, str):
@@ -237,6 +448,79 @@ async def get_forecast() -> str:
         f"5-day forecast for {forecast['neighborhood']} "
         f"(Station ID: {STATION_ID})"
     ]
+
+    for day in forecast["days"]:
+        lines.append(
+            f"\n{day['day']}: High {format_temperature(day['high_f'])} / "
+            f"Low {format_temperature(day['low_f'])}\n"
+            f"Summary: {day['narrative']}"
+        )
+
+        if day["day_summary"]:
+            lines.append(day["day_summary"])
+
+        if day["night_summary"]:
+            lines.append(day["night_summary"])
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def get_current_conditions_for_city_state(
+    city: str,
+    state: str = "",
+) -> str:
+    """Get current weather conditions for a specific city and state.
+
+    Use this whenever the user names a city or state, such as
+    'Kyle, TX' or 'Austin, Texas'. Accepts city+state separately
+    or combined as 'City, ST' or 'City ST'. Do NOT use this for
+    the user's own station.
+    """
+    conditions = await get_city_current_conditions_payload(city, state)
+
+    if isinstance(conditions, str):
+        return conditions
+
+    neighborhood = conditions.get("neighborhood") or ""
+    station_id = conditions.get("station_id") or ""
+    station_note = (
+        f" (nearest station: {neighborhood} {station_id})".rstrip()
+        if neighborhood or station_id
+        else ""
+    )
+
+    return (
+        f"Current weather in {conditions['location']}{station_note}\n"
+        f"Observed local: {conditions['observed_local']}\n"
+        f"Temperature: {conditions['temperature_f']}°F\n"
+        f"Feels like: {conditions['feels_like_f']}°F\n"
+        f"Wind chill: {conditions['wind_chill_f']}°F\n"
+        f"Dew point: {conditions['dew_point_f']}°F\n"
+        f"Humidity: {conditions['humidity_percent']}%\n"
+        f"Wind: {conditions['wind_speed_mph']} mph from "
+        f"{conditions['wind_direction_degrees']}°\n"
+        f"Wind gust: {conditions['wind_gust_mph']} mph\n"
+        f"Pressure: {conditions['pressure_inhg']} inHg\n"
+        f"UV: {conditions['uv']}"
+    )
+
+
+@mcp.tool()
+async def get_forecast_for_city_state(city: str, state: str = "") -> str:
+    """Get a 5-day weather forecast for a specific city and state.
+
+    Use this whenever the user names a city or state, such as
+    'Kyle, TX' or 'Austin, Texas'. Accepts city+state separately
+    or combined as 'City, ST' or 'City ST'. Do NOT use this for
+    the user's own station.
+    """
+    forecast = await get_city_forecast_payload(city, state)
+
+    if isinstance(forecast, str):
+        return forecast
+
+    lines = [f"5-day forecast for {forecast['location']}"]
 
     for day in forecast["days"]:
         lines.append(

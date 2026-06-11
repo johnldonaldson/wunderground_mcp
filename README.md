@@ -2,7 +2,8 @@
 
 This repository provides a small Model Context Protocol (MCP) server for Weather
 Underground / Weather.com personal weather station data. It exposes tools for
-current local conditions and a 5-day forecast for a configured station.
+current local conditions and a 5-day forecast for a configured station, plus
+current conditions and forecasts for a specified city/state.
 
 The server is implemented with `FastMCP`. It can run from VS Code MCP
 configuration over stdio, or from Docker as an HTTP SSE service for Home
@@ -18,6 +19,8 @@ Assistant.
 - 5-day daily forecast based on the configured station's latitude and longitude.
 - Forecast summaries include high/low temperatures, narrative text, day/night
 	conditions, precipitation chance, and wind descriptions.
+- City/state tools can look up current conditions and a 5-day forecast for any
+	Weather.com-supported city and state.
 
 ## Requirements
 
@@ -26,7 +29,9 @@ Assistant.
 - `uv` installed and available on your `PATH`.
 - A Weather Underground / Weather.com API key with access to:
 	- `https://api.weather.com/v2/pws/observations/current`
+	- `https://api.weather.com/v3/wx/observations/current`
 	- `https://api.weather.com/v3/wx/forecast/daily/5day`
+	- `https://api.weather.com/v3/location/search`
 - A Weather Underground personal weather station ID, for example
 	`KCAHUNTI63`.
 
@@ -185,9 +190,11 @@ Assistant, expose `sensor.wunderground_forecast_today` and
 
 ## Available MCP Tools
 
-### `get_current_conditions`
+### `get_station_conditions`
 
-Returns the latest current observation for the configured station.
+Returns the latest current observation for the user's own personal weather
+station. Use this for queries like "what is my weather" or "current conditions"
+when no city or state is named.
 
 Example output:
 
@@ -210,11 +217,12 @@ Elevation: 43 ft
 QC status: 1
 ```
 
-### `get_forecast`
+### `get_station_forecast`
 
-Returns a 5-day forecast for the configured station. The server first retrieves
-the station's current observation, uses its latitude and longitude, then requests
-the daily forecast endpoint.
+Returns a 5-day forecast for the user's own personal weather station. Use this
+for queries like "what is my forecast" or "will it rain this week" when no city
+or state is named. The server retrieves the station's current observation, uses
+its latitude and longitude, then requests the daily forecast endpoint.
 
 Example output:
 
@@ -231,6 +239,56 @@ Tomorrow: Mostly Sunny, precip 20%, Winds SSW at 10 to 15 mph.
 Tomorrow night: Partly Cloudy, precip 11%, Winds SSE at 5 to 10 mph.
 ```
 
+### `get_current_conditions_for_city_state`
+
+Returns current conditions for a specified city/state.
+
+Arguments:
+
+| Argument | Description |
+| --- | --- |
+| `city` | City name, for example `Huntington Beach`, or combined city/state like `Huntington Beach, CA` or `Kyle TX`. |
+| `state` | Optional when `city` contains `City, ST`; otherwise use a state abbreviation or name, for example `CA`. |
+
+Example output:
+
+```text
+Current weather in Huntington Beach, CA
+Observed local: 2026-06-10T09:53:00-0700
+Conditions: Partly Cloudy
+Temperature: 68°F
+Feels like: 68°F
+Wind chill: 68°F
+Dew point: 60°F
+Humidity: 76%
+Wind: 8 mph from 210°
+Wind gust: 14 mph
+Pressure: 29.91 inHg
+UV: 3
+```
+
+### `get_forecast_for_city_state`
+
+Returns a 5-day forecast for a specified city/state.
+
+Arguments:
+
+| Argument | Description |
+| --- | --- |
+| `city` | City name, for example `Huntington Beach`, or combined city/state like `Huntington Beach, CA` or `Kyle TX`. |
+| `state` | Optional when `city` contains `City, ST`; otherwise use a state abbreviation or name, for example `CA`. |
+
+Example output:
+
+```text
+5-day forecast for Huntington Beach, CA
+
+Wednesday: High 70°F / Low 62°F
+Summary: Partly cloudy. Highs in the low 70s and lows in the low 60s.
+Today: Partly Cloudy, precip 10%, Winds SW at 5 to 10 mph.
+Tonight: Partly Cloudy, precip 12%, Winds S at 5 to 10 mph.
+```
+
 ## Local Development
 
 Run the MCP server directly:
@@ -243,14 +301,14 @@ Run a direct current-conditions check:
 
 ```sh
 WU_API_KEY="your-api-key" WU_STATION_ID="KCAHUNTI63" \
-	uv run python -c 'import asyncio, wunderground_server; print(asyncio.run(wunderground_server.get_current_conditions()))'
+	uv run python -c 'import asyncio, wunderground_server; print(asyncio.run(wunderground_server.get_station_conditions()))'
 ```
 
 Run a direct forecast check:
 
 ```sh
 WU_API_KEY="your-api-key" WU_STATION_ID="KCAHUNTI63" \
-	uv run python -c 'import asyncio, wunderground_server; print(asyncio.run(wunderground_server.get_forecast()))'
+	uv run python -c 'import asyncio, wunderground_server; print(asyncio.run(wunderground_server.get_station_forecast()))'
 ```
 
 ## Project Structure
