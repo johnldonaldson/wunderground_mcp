@@ -25,6 +25,16 @@ async def run() -> None:
 
     print()
     print("=" * 60)
+    print("TEST 2b: City/state — get_current_conditions_for_city_state")
+    print("          city='Kyle, TX' (combined)")
+    print("=" * 60)
+    result = await wunderground_server.get_current_conditions_for_city_state(
+        "Kyle, TX"
+    )
+    print(result)
+
+    print()
+    print("=" * 60)
     print("TEST 3: City/state forecast — get_forecast_for_city_state")
     print("         city='Kyle', state='TX'")
     print("=" * 60)

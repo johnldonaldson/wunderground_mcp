@@ -58,9 +58,6 @@ mcp = FastMCP(
 API_KEY = os.getenv("WU_API_KEY")
 STATION_ID = os.getenv("WU_STATION_ID", "KCAHUNTI63")
 CURRENT_CONDITIONS_URL = "https://api.weather.com/v2/pws/observations/current"
-NEAREST_STATION_URL = (
-    "https://api.weather.com/v2/pws/observations/nearest"
-)
 DAILY_FORECAST_URL = "https://api.weather.com/v3/wx/forecast/daily/5day"
 LOCATION_SEARCH_URL = "https://api.weather.com/v3/location/search"
 
@@ -330,42 +327,52 @@ async def get_city_current_conditions_payload(
     if isinstance(location, str):
         return location
 
-    data = await fetch_weather_json(
-        NEAREST_STATION_URL,
+    forecast_data = await fetch_weather_json(
+        DAILY_FORECAST_URL,
         {
             "geocode": location["geocode"],
-            "units": "e",
-            "numStations": 1,
             "format": "json",
+            "units": "e",
+            "language": "en-US",
         },
     )
 
-    if isinstance(data, str):
-        return data
+    if isinstance(forecast_data, str):
+        return forecast_data
 
-    observations = data.get("observations")
+    dayparts = forecast_data.get("daypart")
 
-    if not isinstance(observations, list) or not observations:
-        return f"No current conditions found near {location['query']}."
+    if not isinstance(dayparts, list) or not dayparts:
+        return f"No conditions data found for {location['query']}."
 
-    observation = observations[0]
-    obs = observation.get("imperial", {})
+    daypart = dayparts[0]
+    names = daypart.get("daypartName") or []
+
+    active_index = 0
+    for i, name in enumerate(names):
+        if name is not None:
+            active_index = i
+            break
+
+    phrase = get_indexed_weather_value(daypart, "wxPhraseLong", active_index)
+    precip = get_indexed_weather_value(daypart, "precipChance", active_index)
+    wind = get_indexed_weather_value(daypart, "windPhrase", active_index)
+    period = get_indexed_weather_value(
+        daypart, "daypartName", active_index
+    ) or "Today"
+    high = get_indexed_weather_value(forecast_data, "temperatureMax", 0)
+    low = get_indexed_weather_value(forecast_data, "temperatureMin", 0)
+    narrative = get_indexed_weather_value(forecast_data, "narrative", 0)
 
     return {
         "location": format_city_state_location(location),
-        "neighborhood": observation.get("neighborhood"),
-        "station_id": observation.get("stationID"),
-        "observed_local": observation.get("obsTimeLocal"),
-        "temperature_f": obs.get("temp"),
-        "feels_like_f": obs.get("heatIndex"),
-        "wind_chill_f": obs.get("windChill"),
-        "dew_point_f": obs.get("dewpt"),
-        "humidity_percent": observation.get("humidity"),
-        "wind_speed_mph": obs.get("windSpeed"),
-        "wind_direction_degrees": observation.get("winddir"),
-        "wind_gust_mph": obs.get("windGust"),
-        "pressure_inhg": obs.get("pressure"),
-        "uv": observation.get("uv"),
+        "period": period,
+        "phrase": phrase or "Unavailable",
+        "narrative": narrative or "Unavailable",
+        "high_f": high,
+        "low_f": low,
+        "precip_chance": precip,
+        "wind_phrase": wind,
     }
 
 
@@ -482,28 +489,22 @@ async def get_current_conditions_for_city_state(
     if isinstance(conditions, str):
         return conditions
 
-    neighborhood = conditions.get("neighborhood") or ""
-    station_id = conditions.get("station_id") or ""
-    station_note = (
-        f" (nearest station: {neighborhood} {station_id})".rstrip()
-        if neighborhood or station_id
-        else ""
-    )
+    lines = [
+        f"Current conditions for {conditions['location']}"
+        f" ({conditions['period']})",
+        f"Conditions: {conditions['phrase']}",
+        f"Summary: {conditions['narrative']}",
+        f"High: {format_temperature(conditions['high_f'])} / "
+        f"Low: {format_temperature(conditions['low_f'])}",
+    ]
 
-    return (
-        f"Current weather in {conditions['location']}{station_note}\n"
-        f"Observed local: {conditions['observed_local']}\n"
-        f"Temperature: {conditions['temperature_f']}°F\n"
-        f"Feels like: {conditions['feels_like_f']}°F\n"
-        f"Wind chill: {conditions['wind_chill_f']}°F\n"
-        f"Dew point: {conditions['dew_point_f']}°F\n"
-        f"Humidity: {conditions['humidity_percent']}%\n"
-        f"Wind: {conditions['wind_speed_mph']} mph from "
-        f"{conditions['wind_direction_degrees']}°\n"
-        f"Wind gust: {conditions['wind_gust_mph']} mph\n"
-        f"Pressure: {conditions['pressure_inhg']} inHg\n"
-        f"UV: {conditions['uv']}"
-    )
+    if conditions["precip_chance"] is not None:
+        lines.append(f"Precip chance: {conditions['precip_chance']}%")
+
+    if conditions["wind_phrase"]:
+        lines.append(f"Wind: {conditions['wind_phrase']}")
+
+    return "\n".join(lines)
 
 
 @mcp.tool()
